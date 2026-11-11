@@ -62,7 +62,7 @@ func (s *Service) Cleanup() error {
 	}
 
 	for name, subs := range s.subs {
-		newSub := make([]*Subscriber, 0, len(s.subs))
+		newSub := make([]*Subscriber, 0, len(subs))
 		for _, sub := range subs {
 			if !sub.IsClosed() {
 				newSub = append(newSub, sub)
@@ -87,8 +87,7 @@ func (s *Service) Subscribe(name string) *Subscriber {
 		done:   done.New(),
 	}
 	s.Lock()
-	subs := append(s.subs[name], sub)
-	s.subs[name] = subs
+	s.subs[name] = append(s.subs[name], sub)
 	s.Unlock()
 	common.Must(s.ctask.Start())
 	return sub

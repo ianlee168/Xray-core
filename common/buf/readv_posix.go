@@ -1,6 +1,4 @@
-// +build !windows
-// +build !wasm
-// +build !illumos
+//go:build !windows && !openbsd
 
 package buf
 
@@ -20,7 +18,7 @@ func (r *posixReader) Init(bs []*Buffer) {
 	}
 	for idx, b := range bs {
 		iovecs = append(iovecs, syscall.Iovec{
-			Base: &(b.v[0]),
+			Base: &b.v[0],
 		})
 		iovecs[idx].SetLen(int(Size))
 	}

@@ -7,7 +7,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/miekg/dns"
-
 	"github.com/xtls/xray-core/app/dispatcher"
 	dnsapp "github.com/xtls/xray-core/app/dns"
 	"github.com/xtls/xray-core/app/policy"
@@ -15,6 +14,7 @@ import (
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
 	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/geodata"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
@@ -24,8 +24,7 @@ import (
 	"github.com/xtls/xray-core/testing/servers/udp"
 )
 
-type staticHandler struct {
-}
+type staticHandler struct{}
 
 func (*staticHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	ans := new(dns.Msg)
@@ -93,15 +92,17 @@ func TestUDPDNSTunnel(t *testing.T) {
 	config := &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(&dnsapp.Config{
-				NameServers: []*net.Endpoint{
+				NameServer: []*dnsapp.NameServer{
 					{
-						Network: net.Network_UDP,
-						Address: &net.IPOrDomain{
-							Address: &net.IPOrDomain_Ip{
-								Ip: []byte{127, 0, 0, 1},
+						Address: &net.Endpoint{
+							Network: net.Network_UDP,
+							Address: &net.IPOrDomain{
+								Address: &net.IPOrDomain_Ip{
+									Ip: []byte{127, 0, 0, 1},
+								},
 							},
+							Port: uint32(port),
 						},
-						Port: uint32(port),
 					},
 				},
 			}),
@@ -113,13 +114,13 @@ func TestUDPDNSTunnel(t *testing.T) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					Address:  net.NewIPOrDomain(net.LocalHostIP),
-					Port:     uint32(port),
-					Networks: []net.Network{net.Network_UDP},
+					RewriteAddress:  net.NewIPOrDomain(net.LocalHostIP),
+					RewritePort:     uint32(port),
+					AllowedNetworks: []net.Network{net.Network_UDP},
 				}),
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortRange: net.SinglePortRange(serverPort),
-					Listen:    net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
+					Listen:   net.NewIPOrDomain(net.LocalHostIP),
 				}),
 			},
 		},
@@ -232,13 +233,13 @@ func TestTCPDNSTunnel(t *testing.T) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					Address:  net.NewIPOrDomain(net.LocalHostIP),
-					Port:     uint32(port),
-					Networks: []net.Network{net.Network_TCP},
+					RewriteAddress:  net.NewIPOrDomain(net.LocalHostIP),
+					RewritePort:     uint32(port),
+					AllowedNetworks: []net.Network{net.Network_TCP},
 				}),
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortRange: net.SinglePortRange(serverPort),
-					Listen:    net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
+					Listen:   net.NewIPOrDomain(net.LocalHostIP),
 				}),
 			},
 		},
@@ -318,20 +319,20 @@ func TestUDP2TCPDNSTunnel(t *testing.T) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					Address:  net.NewIPOrDomain(net.LocalHostIP),
-					Port:     uint32(port),
-					Networks: []net.Network{net.Network_TCP},
+					RewriteAddress:  net.NewIPOrDomain(net.LocalHostIP),
+					RewritePort:     uint32(port),
+					AllowedNetworks: []net.Network{net.Network_TCP},
 				}),
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortRange: net.SinglePortRange(serverPort),
-					Listen:    net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
+					Listen:   net.NewIPOrDomain(net.LocalHostIP),
 				}),
 			},
 		},
 		Outbound: []*core.OutboundHandlerConfig{
 			{
 				ProxySettings: serial.ToTypedMessage(&dns_proxy.Config{
-					Server: &net.Endpoint{
+					RewriteServer: &net.Endpoint{
 						Network: net.Network_TCP,
 					},
 				}),
@@ -366,5 +367,129 @@ func TestUDP2TCPDNSTunnel(t *testing.T) {
 	}
 	if r := cmp.Diff(rr.A[:], net.IP{8, 8, 8, 8}); r != "" {
 		t.Error(r)
+	}
+}
+
+func TestDNSRules(t *testing.T) {
+	port := udp.PickPort()
+
+	dnsServer := dns.Server{
+		Addr:    "127.0.0.1:" + port.String(),
+		Net:     "udp",
+		Handler: &staticHandler{},
+	}
+	defer dnsServer.Shutdown()
+
+	go dnsServer.ListenAndServe()
+	time.Sleep(time.Second)
+
+	serverPort := udp.PickPort()
+	config := &core.Config{
+		App: []*serial.TypedMessage{
+			serial.ToTypedMessage(&dnsapp.Config{
+				NameServer: []*dnsapp.NameServer{
+					{
+						Address: &net.Endpoint{
+							Network: net.Network_UDP,
+							Address: &net.IPOrDomain{
+								Address: &net.IPOrDomain_Ip{
+									Ip: []byte{127, 0, 0, 1},
+								},
+							},
+							Port: uint32(port),
+						},
+					},
+				},
+			}),
+			serial.ToTypedMessage(&dispatcher.Config{}),
+			serial.ToTypedMessage(&proxyman.OutboundConfig{}),
+			serial.ToTypedMessage(&proxyman.InboundConfig{}),
+			serial.ToTypedMessage(&policy.Config{}),
+		},
+		Inbound: []*core.InboundHandlerConfig{
+			{
+				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
+					RewriteAddress:  net.NewIPOrDomain(net.LocalHostIP),
+					RewritePort:     uint32(port),
+					AllowedNetworks: []net.Network{net.Network_UDP},
+				}),
+				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
+					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
+					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+				}),
+			},
+		},
+		Outbound: []*core.OutboundHandlerConfig{
+			{
+				ProxySettings: serial.ToTypedMessage(&dns_proxy.Config{
+					Rule: []*dns_proxy.DNSRuleConfig{
+						{
+							QType: []int32{int32(dns.TypeA)},
+							Domain: []*geodata.DomainRule{
+								{
+									Value: &geodata.DomainRule_Custom{
+										Custom: &geodata.Domain{
+											Type:  geodata.Domain_Domain,
+											Value: "facebook.com",
+										},
+									},
+								},
+							},
+							Action: dns_proxy.RuleAction_Direct,
+						},
+						{
+							QType: []int32{int32(dns.TypeA)},
+							Domain: []*geodata.DomainRule{
+								{
+									Value: &geodata.DomainRule_Custom{
+										Custom: &geodata.Domain{
+											Type:  geodata.Domain_Full,
+											Value: "google.com",
+										},
+									},
+								},
+							},
+							Action: dns_proxy.RuleAction_Return,
+							RCode:  5,
+						},
+					},
+				}),
+			},
+		},
+	}
+
+	v, err := core.New(config)
+	common.Must(err)
+	common.Must(v.Start())
+	defer v.Close()
+
+	{
+		m1 := new(dns.Msg)
+		m1.Id = dns.Id()
+		m1.RecursionDesired = true
+		m1.Question = []dns.Question{{Name: "google.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+
+		c := new(dns.Client)
+		in, _, err := c.Exchange(m1, "127.0.0.1:"+strconv.Itoa(int(serverPort)))
+		common.Must(err)
+
+		if in.Rcode != dns.RcodeRefused {
+			t.Fatal("expected Refused, but got ", in.Rcode)
+		}
+	}
+
+	{
+		m1 := new(dns.Msg)
+		m1.Id = dns.Id()
+		m1.RecursionDesired = true
+		m1.Question = []dns.Question{{Name: "facebook.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+
+		c := new(dns.Client)
+		in, _, err := c.Exchange(m1, "127.0.0.1:"+strconv.Itoa(int(serverPort)))
+		common.Must(err)
+
+		if in.Rcode != dns.RcodeSuccess {
+			t.Fatal("expected Success, but got ", in.Rcode)
+		}
 	}
 }

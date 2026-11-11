@@ -3,11 +3,10 @@ package encoding
 import (
 	"context"
 	"io"
-	"net"
-
-	"google.golang.org/grpc/peer"
 
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/common/signal/done"
 )
@@ -32,24 +31,16 @@ func NewMultiHunkReadWriter(hc MultiHunkConn, cancel context.CancelFunc) *MultiH
 	return &MultiHunkReaderWriter{hc, cancel, done.New(), nil}
 }
 
-func NewMultiHunkConn(hc MultiHunkConn, cancel context.CancelFunc) net.Conn {
-	var rAddr net.Addr
-	pr, ok := peer.FromContext(hc.Context())
-	if ok {
-		rAddr = pr.Addr
-	} else {
-		rAddr = &net.TCPAddr{
-			IP:   []byte{0, 0, 0, 0},
-			Port: 0,
-		}
-	}
-
+func NewMultiHunkConn(hc MultiHunkConn, cancel context.CancelFunc, trustedXForwardedFor []string) net.Conn {
+	rAddr := remoteAddrFromContext(hc.Context(), trustedXForwardedFor)
+	lAddr := localAddrFromContext(hc.Context())
 	wrc := NewMultiHunkReadWriter(hc, cancel)
 	return cnc.NewConnection(
 		cnc.ConnectionInputMulti(wrc),
 		cnc.ConnectionOutputMulti(wrc),
 		cnc.ConnectionOnClose(wrc),
 		cnc.ConnectionRemoteAddr(rAddr),
+		cnc.ConnectionLocalAddr(lAddr),
 	)
 }
 
@@ -60,7 +51,7 @@ func (h *MultiHunkReaderWriter) forceFetch() error {
 			return err
 		}
 
-		return newError("failed to fetch hunk from gRPC tunnel").Base(err)
+		return errors.New("failed to fetch hunk from gRPC tunnel").Base(err)
 	}
 
 	h.buf = hunk.Data
@@ -77,7 +68,7 @@ func (h *MultiHunkReaderWriter) ReadMultiBuffer() (buf.MultiBuffer, error) {
 		return nil, err
 	}
 
-	var mb = make(buf.MultiBuffer, 0, len(h.buf))
+	mb := make(buf.MultiBuffer, 0, len(h.buf))
 	for _, b := range h.buf {
 		if len(b) == 0 {
 			continue

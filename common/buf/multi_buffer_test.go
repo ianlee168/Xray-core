@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"io"
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -107,7 +106,7 @@ func TestMultiBufferReadAllToByte(t *testing.T) {
 		common.Must(err)
 
 		if l := len(b); l != 8*1024 {
-			t.Error("unexpceted length from ReadAllToBytes", l)
+			t.Error("unexpected length from ReadAllToBytes", l)
 		}
 	}
 	{
@@ -119,7 +118,7 @@ func TestMultiBufferReadAllToByte(t *testing.T) {
 		common.Must(err)
 		f.Close()
 
-		cnt, err := ioutil.ReadFile(dat)
+		cnt, err := os.ReadFile(dat)
 		common.Must(err)
 
 		if d := cmp.Diff(buf2, cnt); d != "" {
@@ -140,7 +139,7 @@ func TestMultiBufferCopy(t *testing.T) {
 	mb.Copy(lbdst)
 
 	if d := cmp.Diff(lb, lbdst); d != "" {
-		t.Error("unexpceted different from MultiBufferCopy ", d)
+		t.Error("unexpected different from MultiBufferCopy ", d)
 	}
 }
 
@@ -172,6 +171,29 @@ func TestCompact(t *testing.T) {
 	cmb := Compact(mb)
 
 	if w := cmb.String(); w != "abbc" {
+		t.Error("unexpected Compact result ", w)
+	}
+}
+
+func TestCompactWithConsumed(t *testing.T) {
+	// make a consumed buffer (a.Start != 0)
+	a := New()
+	for range 8192 {
+		common.Must2(a.WriteString("a"))
+	}
+	a.Read(make([]byte, 2))
+
+	b := New()
+	for range 2 {
+		common.Must2(b.WriteString("b"))
+	}
+
+	mb := MultiBuffer{a, b}
+	cmb := Compact(mb)
+	mbc := &MultiBufferContainer{mb}
+	mbc.Read(make([]byte, 8190))
+
+	if w := cmb.String(); w != "bb" {
 		t.Error("unexpected Compact result ", w)
 	}
 }

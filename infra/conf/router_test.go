@@ -2,13 +2,18 @@ package conf_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
-
-	"github.com/golang/protobuf/proto"
+	"time"
+	_ "unsafe"
 
 	"github.com/xtls/xray-core/app/router"
+	"github.com/xtls/xray-core/common/geodata"
 	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/serial"
 	. "github.com/xtls/xray-core/infra/conf"
+
+	"google.golang.org/protobuf/proto"
 )
 
 func TestRouterConfig(t *testing.T) {
@@ -25,40 +30,62 @@ func TestRouterConfig(t *testing.T) {
 	runMultiTestCase(t, []TestCase{
 		{
 			Input: `{
-				"strategy": "rules",
-				"settings": {
-					"domainStrategy": "AsIs",
-					"rules": [
-						{
-							"type": "field",
-							"domain": [
-								"baidu.com",
-								"qq.com"
-							],
-							"outboundTag": "direct"
-						},
-						{
-							"type": "field",
-							"ip": [
-								"10.0.0.0/8",
-								"::1/128"
-							],
-							"outboundTag": "test"
-						},{
-							"type": "field",
-							"port": "53, 443, 1000-2000",
-							"outboundTag": "test"
-						},{
-							"type": "field",
-							"port": 123,
-							"outboundTag": "test"
-						}
-					]
-				},
+				"domainStrategy": "AsIs",
+				"rules": [
+					{
+						"domain": [
+							"baidu.com",
+							"qq.com"
+						],
+						"outboundTag": "direct"
+					},
+					{
+						"ip": [
+							"10.0.0.0/8",
+							"::1/128"
+						],
+						"outboundTag": "test"
+					},{
+						"port": "53, 443, 1000-2000",
+						"outboundTag": "test"
+					},{
+						"port": 123,
+						"outboundTag": "test"
+					}
+				],
 				"balancers": [
 					{
 						"tag": "b1",
-						"selector": ["test"]
+						"selector": ["test"],
+						"fallbackTag": "fall"
+					},
+					{
+						"tag": "b2",
+						"selector": ["test"],
+						"strategy": {
+							"type": "leastload",
+							"settings": {
+								"healthCheck": {
+									"interval": "5m0s",
+									"sampling": 2,
+									"timeout": "5s",
+									"destination": "dest",
+									"connectivity": "conn"
+								},
+								"costs": [
+									{
+										"regexp": true,
+										"match": "\\d+(\\.\\d+)",
+										"value": 5
+									}
+								],
+								"baselines": ["400ms", "600ms"],
+								"expected": 6,
+								"maxRTT": "1000ms",
+								"tolerance": 0.5
+							}
+						},
+						"fallbackTag": "fall"
 					}
 				]
 			}`,
@@ -69,35 +96,55 @@ func TestRouterConfig(t *testing.T) {
 					{
 						Tag:              "b1",
 						OutboundSelector: []string{"test"},
+						Strategy:         "random",
+						FallbackTag:      "fall",
+					},
+					{
+						Tag:              "b2",
+						OutboundSelector: []string{"test"},
+						Strategy:         "leastload",
+						StrategySettings: serial.ToTypedMessage(&router.StrategyLeastLoadConfig{
+							Costs: []*router.StrategyWeight{
+								{
+									Regexp: true,
+									Match:  "\\d+(\\.\\d+)",
+									Value:  5,
+								},
+							},
+							Baselines: []int64{
+								int64(time.Duration(400) * time.Millisecond),
+								int64(time.Duration(600) * time.Millisecond),
+							},
+							Expected:  6,
+							MaxRTT:    int64(time.Duration(1000) * time.Millisecond),
+							Tolerance: 0.5,
+						}),
+						FallbackTag: "fall",
 					},
 				},
 				Rule: []*router.RoutingRule{
 					{
-						Domain: []*router.Domain{
-							{
-								Type:  router.Domain_Plain,
-								Value: "baidu.com",
-							},
-							{
-								Type:  router.Domain_Plain,
-								Value: "qq.com",
-							},
+						Domain: []*geodata.DomainRule{
+							{Value: &geodata.DomainRule_Custom{Custom: &geodata.Domain{Type: geodata.Domain_Substr, Value: "baidu.com"}}},
+							{Value: &geodata.DomainRule_Custom{Custom: &geodata.Domain{Type: geodata.Domain_Substr, Value: "qq.com"}}},
 						},
 						TargetTag: &router.RoutingRule_Tag{
 							Tag: "direct",
 						},
 					},
 					{
-						Geoip: []*router.GeoIP{
+						Ip: []*geodata.IPRule{
 							{
-								Cidr: []*router.CIDR{
-									{
-										Ip:     []byte{10, 0, 0, 0},
-										Prefix: 8,
+								Value: &geodata.IPRule_Custom{
+									Custom: &geodata.CIDRRule{
+										Cidr: &geodata.CIDR{Ip: []byte{10, 0, 0, 0}, Prefix: 8},
 									},
-									{
-										Ip:     []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-										Prefix: 128,
+								},
+							},
+							{
+								Value: &geodata.IPRule_Custom{
+									Custom: &geodata.CIDRRule{
+										Cidr: &geodata.CIDR{Ip: []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, Prefix: 128},
 									},
 								},
 							},
@@ -133,76 +180,9 @@ func TestRouterConfig(t *testing.T) {
 		},
 		{
 			Input: `{
-				"strategy": "rules",
-				"settings": {
-					"domainStrategy": "IPIfNonMatch",
-					"rules": [
-						{
-							"type": "field",
-							"domain": [
-								"baidu.com",
-								"qq.com"
-							],
-							"outboundTag": "direct"
-						},
-						{
-							"type": "field",
-							"ip": [
-								"10.0.0.0/8",
-								"::1/128"
-							],
-							"outboundTag": "test"
-						}
-					]
-				}
-			}`,
-			Parser: createParser(),
-			Output: &router.Config{
-				DomainStrategy: router.Config_IpIfNonMatch,
-				Rule: []*router.RoutingRule{
-					{
-						Domain: []*router.Domain{
-							{
-								Type:  router.Domain_Plain,
-								Value: "baidu.com",
-							},
-							{
-								Type:  router.Domain_Plain,
-								Value: "qq.com",
-							},
-						},
-						TargetTag: &router.RoutingRule_Tag{
-							Tag: "direct",
-						},
-					},
-					{
-						Geoip: []*router.GeoIP{
-							{
-								Cidr: []*router.CIDR{
-									{
-										Ip:     []byte{10, 0, 0, 0},
-										Prefix: 8,
-									},
-									{
-										Ip:     []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-										Prefix: 128,
-									},
-								},
-							},
-						},
-						TargetTag: &router.RoutingRule_Tag{
-							Tag: "test",
-						},
-					},
-				},
-			},
-		},
-		{
-			Input: `{
-				"domainStrategy": "AsIs",
+				"domainStrategy": "IPIfNonMatch",
 				"rules": [
 					{
-						"type": "field",
 						"domain": [
 							"baidu.com",
 							"qq.com"
@@ -210,7 +190,6 @@ func TestRouterConfig(t *testing.T) {
 						"outboundTag": "direct"
 					},
 					{
-						"type": "field",
 						"ip": [
 							"10.0.0.0/8",
 							"::1/128"
@@ -221,34 +200,30 @@ func TestRouterConfig(t *testing.T) {
 			}`,
 			Parser: createParser(),
 			Output: &router.Config{
-				DomainStrategy: router.Config_AsIs,
+				DomainStrategy: router.Config_IpIfNonMatch,
 				Rule: []*router.RoutingRule{
 					{
-						Domain: []*router.Domain{
-							{
-								Type:  router.Domain_Plain,
-								Value: "baidu.com",
-							},
-							{
-								Type:  router.Domain_Plain,
-								Value: "qq.com",
-							},
+						Domain: []*geodata.DomainRule{
+							{Value: &geodata.DomainRule_Custom{Custom: &geodata.Domain{Type: geodata.Domain_Substr, Value: "baidu.com"}}},
+							{Value: &geodata.DomainRule_Custom{Custom: &geodata.Domain{Type: geodata.Domain_Substr, Value: "qq.com"}}},
 						},
 						TargetTag: &router.RoutingRule_Tag{
 							Tag: "direct",
 						},
 					},
 					{
-						Geoip: []*router.GeoIP{
+						Ip: []*geodata.IPRule{
 							{
-								Cidr: []*router.CIDR{
-									{
-										Ip:     []byte{10, 0, 0, 0},
-										Prefix: 8,
+								Value: &geodata.IPRule_Custom{
+									Custom: &geodata.CIDRRule{
+										Cidr: &geodata.CIDR{Ip: []byte{10, 0, 0, 0}, Prefix: 8},
 									},
-									{
-										Ip:     []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-										Prefix: 128,
+								},
+							},
+							{
+								Value: &geodata.IPRule_Custom{
+									Custom: &geodata.CIDRRule{
+										Cidr: &geodata.CIDR{Ip: []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, Prefix: 128},
 									},
 								},
 							},
@@ -261,4 +236,41 @@ func TestRouterConfig(t *testing.T) {
 			},
 		},
 	})
+}
+
+func TestRouterScriptConfig(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		input     string
+		wantError bool
+	}{
+		{name: "script only", input: `{"script":"missing.lua"}`},
+		{name: "empty rules", input: `{"script":"missing.lua","rules":[]}`},
+		{name: "balancers", input: `{"script":"missing.lua","balancers":[{"tag":"b1","selector":["direct"]}]}`},
+		{name: "default domain strategy", input: `{"script":"missing.lua","domainStrategy":"AsIs"}`, wantError: true},
+		{name: "IP domain strategy", input: `{"script":"missing.lua","domainStrategy":"IPIfNonMatch"}`, wantError: true},
+		{name: "empty domain strategy", input: `{"script":"missing.lua","domainStrategy":""}`, wantError: true},
+		{name: "rules", input: `{"script":"missing.lua","rules":[{"outboundTag":"direct","domain":["example.com"]}]}`, wantError: true},
+		{name: "empty script", input: `{"script":"","domainStrategy":"IPOnDemand","rules":[{"outboundTag":"direct","domain":["example.com"]}]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var config RouterConfig
+			if err := json.Unmarshal([]byte(test.input), &config); err != nil {
+				t.Fatal(err)
+			}
+			built, err := config.Build()
+			if test.wantError {
+				if built != nil || err == nil || !strings.Contains(err.Error(), "routing script cannot be used with domainStrategy or rules") {
+					t.Fatalf("Build() = %v, %v; want nil config and script conflict error", built, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if built.Script != config.Script || len(built.Rule) != len(config.RuleList) || len(built.BalancingRule) != len(config.Balancers) {
+				t.Fatalf("Build() did not preserve script, rules or balancers: %v", built)
+			}
+		})
+	}
 }

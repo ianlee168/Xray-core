@@ -1,4 +1,4 @@
-// +build !wasm
+//go:build !openbsd
 
 package buf_test
 
@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-
 	"github.com/xtls/xray-core/common"
 	. "github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/testing/servers/tcp"
@@ -50,7 +49,7 @@ func TestReadvReader(t *testing.T) {
 	rawConn, err := conn.(*net.TCPConn).SyscallConn()
 	common.Must(err)
 
-	reader := NewReadVReader(conn, rawConn)
+	reader := NewReadVReader(conn, rawConn, nil)
 	var rmb MultiBuffer
 	for {
 		mb, err := reader.ReadMultiBuffer()

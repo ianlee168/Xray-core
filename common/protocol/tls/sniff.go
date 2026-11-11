@@ -3,9 +3,9 @@ package tls
 import (
 	"encoding/binary"
 	"errors"
-	"strings"
 
 	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/protocol"
 )
 
 type SniffHeader struct {
@@ -20,8 +20,10 @@ func (h *SniffHeader) Domain() string {
 	return h.domain
 }
 
-var errNotTLS = errors.New("not TLS header")
-var errNotClientHello = errors.New("not client hello")
+var (
+	errNotTLS         = errors.New("not TLS header")
+	errNotClientHello = errors.New("not client hello")
+)
 
 func IsValidTLSVersion(major, minor byte) bool {
 	return major == 3
@@ -57,9 +59,6 @@ func ReadClientHello(data []byte, h *SniffHeader) error {
 	}
 	data = data[1+compressionMethodsLen:]
 
-	if len(data) == 0 {
-		return errNotClientHello
-	}
 	if len(data) < 2 {
 		return errNotClientHello
 	}
@@ -102,13 +101,25 @@ func ReadClientHello(data []byte, h *SniffHeader) error {
 					return errNotClientHello
 				}
 				if nameType == 0 {
-					serverName := string(d[:nameLen])
+					// RFC 6066 requires a non-empty HostName.
+					if nameLen == 0 {
+						return errNotClientHello
+					}
+					// QUIC separated across packets
+					// May cause the serverName to be incomplete
+					b := byte(0)
+					for _, b = range d[:nameLen] {
+						if b <= ' ' {
+							return protocol.ErrProtoNeedMoreData
+						}
+					}
 					// An SNI value may not include a
 					// trailing dot. See
 					// https://tools.ietf.org/html/rfc6066#section-3.
-					if strings.HasSuffix(serverName, ".") {
+					if b == '.' {
 						return errNotClientHello
 					}
+					serverName := string(d[:nameLen])
 					h.domain = serverName
 					return nil
 				}

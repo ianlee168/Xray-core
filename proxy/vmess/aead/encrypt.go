@@ -2,14 +2,13 @@ package aead
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
 	"io"
 	"time"
 
 	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/crypto"
 )
 
 func SealVMessAEADHeader(key [16]byte, data []byte) []byte {
@@ -34,16 +33,7 @@ func SealVMessAEADHeader(key [16]byte, data []byte) []byte {
 
 		payloadHeaderLengthAEADNonce := KDF(key[:], KDFSaltConstVMessHeaderPayloadLengthAEADIV, string(generatedAuthID[:]), string(connectionNonce))[:12]
 
-		payloadHeaderLengthAEADAESBlock, err := aes.NewCipher(payloadHeaderLengthAEADKey)
-		if err != nil {
-			panic(err.Error())
-		}
-
-		payloadHeaderAEAD, err := cipher.NewGCM(payloadHeaderLengthAEADAESBlock)
-
-		if err != nil {
-			panic(err.Error())
-		}
+		payloadHeaderAEAD := crypto.NewAesGcm(payloadHeaderLengthAEADKey)
 
 		payloadHeaderLengthAEADEncrypted = payloadHeaderAEAD.Seal(nil, payloadHeaderLengthAEADNonce, aeadPayloadLengthSerializedByte, generatedAuthID[:])
 	}
@@ -55,21 +45,12 @@ func SealVMessAEADHeader(key [16]byte, data []byte) []byte {
 
 		payloadHeaderAEADNonce := KDF(key[:], KDFSaltConstVMessHeaderPayloadAEADIV, string(generatedAuthID[:]), string(connectionNonce))[:12]
 
-		payloadHeaderAEADAESBlock, err := aes.NewCipher(payloadHeaderAEADKey)
-		if err != nil {
-			panic(err.Error())
-		}
-
-		payloadHeaderAEAD, err := cipher.NewGCM(payloadHeaderAEADAESBlock)
-
-		if err != nil {
-			panic(err.Error())
-		}
+		payloadHeaderAEAD := crypto.NewAesGcm(payloadHeaderAEADKey)
 
 		payloadHeaderAEADEncrypted = payloadHeaderAEAD.Seal(nil, payloadHeaderAEADNonce, data, generatedAuthID[:])
 	}
 
-	var outputBuffer = bytes.NewBuffer(nil)
+	outputBuffer := bytes.NewBuffer(nil)
 
 	common.Must2(outputBuffer.Write(generatedAuthID[:]))               // 16
 	common.Must2(outputBuffer.Write(payloadHeaderLengthAEADEncrypted)) // 2+16
@@ -106,16 +87,7 @@ func OpenVMessAEADHeader(key [16]byte, authid [16]byte, data io.Reader) ([]byte,
 
 		payloadHeaderLengthAEADNonce := KDF(key[:], KDFSaltConstVMessHeaderPayloadLengthAEADIV, string(authid[:]), string(nonce[:]))[:12]
 
-		payloadHeaderAEADAESBlock, err := aes.NewCipher(payloadHeaderLengthAEADKey)
-		if err != nil {
-			panic(err.Error())
-		}
-
-		payloadHeaderLengthAEAD, err := cipher.NewGCM(payloadHeaderAEADAESBlock)
-
-		if err != nil {
-			panic(err.Error())
-		}
+		payloadHeaderLengthAEAD := crypto.NewAesGcm(payloadHeaderLengthAEADKey)
 
 		decryptedAEADHeaderLengthPayload, erropenAEAD := payloadHeaderLengthAEAD.Open(nil, payloadHeaderLengthAEADNonce, payloadHeaderLengthAEADEncrypted[:], authid[:])
 
@@ -148,16 +120,7 @@ func OpenVMessAEADHeader(key [16]byte, authid [16]byte, data io.Reader) ([]byte,
 			return nil, false, bytesRead, err
 		}
 
-		payloadHeaderAEADAESBlock, err := aes.NewCipher(payloadHeaderAEADKey)
-		if err != nil {
-			panic(err.Error())
-		}
-
-		payloadHeaderAEAD, err := cipher.NewGCM(payloadHeaderAEADAESBlock)
-
-		if err != nil {
-			panic(err.Error())
-		}
+		payloadHeaderAEAD := crypto.NewAesGcm(payloadHeaderAEADKey)
 
 		decryptedAEADHeaderPayload, erropenAEAD := payloadHeaderAEAD.Open(nil, payloadHeaderAEADNonce, payloadHeaderAEADEncrypted, authid[:])
 

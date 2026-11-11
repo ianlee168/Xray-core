@@ -5,7 +5,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-
 	. "github.com/xtls/xray-core/transport/internet/kcp"
 )
 
@@ -72,6 +71,7 @@ func TestACKSegment(t *testing.T) {
 		ReceivingNext:   3,
 		Timestamp:       10,
 		NumberList:      []uint32{1, 3, 5, 7, 9},
+		Limit:           128,
 	}
 
 	nBytes := seg.ByteSize()

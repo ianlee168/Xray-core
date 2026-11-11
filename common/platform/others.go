@@ -1,4 +1,4 @@
-// +build !windows
+//go:build !windows
 
 package platform
 
@@ -7,24 +7,13 @@ import (
 	"path/filepath"
 )
 
-func ExpandEnv(s string) string {
-	return os.ExpandEnv(s)
-}
-
 func LineSeparator() string {
 	return "\n"
 }
 
-func GetToolLocation(file string) string {
-	const name = "xray.location.tool"
-	toolPath := EnvFlag{Name: name, AltName: NormalizeEnvName(name)}.GetValue(getExecutableDir)
-	return filepath.Join(toolPath, file)
-}
-
-// GetAssetLocation search for `file` in certain locations
+// GetAssetLocation searches for `file` in the env dir, the executable dir, and certain locations
 func GetAssetLocation(file string) string {
-	const name = "xray.location.asset"
-	assetPath := NewEnvFlag(name).GetValue(getExecutableDir)
+	assetPath := NewEnvFlag(AssetLocation).GetValue(GetExecutableDir)
 	defPath := filepath.Join(assetPath, file)
 	for _, p := range []string{
 		defPath,
@@ -42,4 +31,10 @@ func GetAssetLocation(file string) string {
 
 	// asset not found, let the caller throw out the error
 	return defPath
+}
+
+// GetCertLocation searches for `file` in the env dir and the executable dir
+func GetCertLocation(file string) string {
+	certPath := NewEnvFlag(CertLocation).GetValue(GetExecutableDir)
+	return filepath.Join(certPath, file)
 }

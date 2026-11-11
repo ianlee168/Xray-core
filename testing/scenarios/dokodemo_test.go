@@ -4,8 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/xtls/xray-core/app/log"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/common"
@@ -22,6 +20,7 @@ import (
 	"github.com/xtls/xray-core/proxy/vmess/outbound"
 	"github.com/xtls/xray-core/testing/servers/tcp"
 	"github.com/xtls/xray-core/testing/servers/udp"
+	"golang.org/x/sync/errgroup"
 )
 
 func TestDokodemoTCP(t *testing.T) {
@@ -44,8 +43,8 @@ func TestDokodemoTCP(t *testing.T) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortRange: net.SinglePortRange(serverPort),
-					Listen:    net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
+					Listen:   net.NewIPOrDomain(net.LocalHostIP),
 				}),
 				ProxySettings: serial.ToTypedMessage(&inbound.Config{
 					User: []*protocol.User{
@@ -60,59 +59,71 @@ func TestDokodemoTCP(t *testing.T) {
 		},
 		Outbound: []*core.OutboundHandlerConfig{
 			{
-				ProxySettings: serial.ToTypedMessage(&freedom.Config{}),
+				ProxySettings: serial.ToTypedMessage(&freedom.Config{
+					FinalRules: []*freedom.FinalRuleConfig{{Action: freedom.RuleAction_Allow}},
+				}),
 			},
 		},
 	}
+	server, err := InitializeServerConfig(serverConfig)
+	common.Must(err)
+	defer CloseServer(server)
 
-	clientPort := uint32(tcp.PickPort())
 	clientPortRange := uint32(5)
-	clientConfig := &core.Config{
-		App: []*serial.TypedMessage{
-			serial.ToTypedMessage(&log.Config{
-				ErrorLogLevel: clog.Severity_Debug,
-				ErrorLogType:  log.LogType_Console,
-			}),
-		},
-		Inbound: []*core.InboundHandlerConfig{
-			{
-				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortRange: &net.PortRange{From: clientPort, To: clientPort + clientPortRange},
-					Listen:    net.NewIPOrDomain(net.LocalHostIP),
-				}),
-				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					Address: net.NewIPOrDomain(dest.Address),
-					Port:    uint32(dest.Port),
-					NetworkList: &net.NetworkList{
-						Network: []net.Network{net.Network_TCP},
-					},
+	retry := 1
+	clientPort := uint32(tcp.PickPort())
+	for {
+		clientConfig := &core.Config{
+			App: []*serial.TypedMessage{
+				serial.ToTypedMessage(&log.Config{
+					ErrorLogLevel: clog.Severity_Debug,
+					ErrorLogType:  log.LogType_Console,
 				}),
 			},
-		},
-		Outbound: []*core.OutboundHandlerConfig{
-			{
-				ProxySettings: serial.ToTypedMessage(&outbound.Config{
-					Receiver: []*protocol.ServerEndpoint{
-						{
+			Inbound: []*core.InboundHandlerConfig{
+				{
+					ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
+						PortList: &net.PortList{Range: []*net.PortRange{{From: clientPort, To: clientPort + clientPortRange}}},
+						Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					}),
+					ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
+						RewriteAddress:  net.NewIPOrDomain(dest.Address),
+						RewritePort:     uint32(dest.Port),
+						AllowedNetworks: []net.Network{net.Network_TCP},
+					}),
+				},
+			},
+			Outbound: []*core.OutboundHandlerConfig{
+				{
+					ProxySettings: serial.ToTypedMessage(&outbound.Config{
+						Receiver: &protocol.ServerEndpoint{
 							Address: net.NewIPOrDomain(net.LocalHostIP),
 							Port:    uint32(serverPort),
-							User: []*protocol.User{
-								{
-									Account: serial.ToTypedMessage(&vmess.Account{
-										Id: userID.String(),
-									}),
-								},
+							User: &protocol.User{
+								Account: serial.ToTypedMessage(&vmess.Account{
+									Id: userID.String(),
+								}),
 							},
 						},
-					},
-				}),
+					}),
+				},
 			},
-		},
-	}
+		}
 
-	servers, err := InitializeServerConfigs(serverConfig, clientConfig)
-	common.Must(err)
-	defer CloseAllServers(servers)
+		server, _ := InitializeServerConfig(clientConfig)
+		if server != nil && WaitConnAvailableWithTest(t, testTCPConn(net.Port(clientPort), 1024, time.Second*2)) {
+			defer CloseServer(server)
+			break
+		}
+		if server != nil {
+			CloseServer(server)
+		}
+		retry++
+		if retry > 5 {
+			t.Fatal("All attempts failed to start client")
+		}
+		clientPort = uint32(tcp.PickPort())
+	}
 
 	for port := clientPort; port <= clientPort+clientPortRange; port++ {
 		if err := testTCPConn(net.Port(port), 1024, time.Second*2)(); err != nil {
@@ -135,8 +146,8 @@ func TestDokodemoUDP(t *testing.T) {
 		Inbound: []*core.InboundHandlerConfig{
 			{
 				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortRange: net.SinglePortRange(serverPort),
-					Listen:    net.NewIPOrDomain(net.LocalHostIP),
+					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort)}},
+					Listen:   net.NewIPOrDomain(net.LocalHostIP),
 				}),
 				ProxySettings: serial.ToTypedMessage(&inbound.Config{
 					User: []*protocol.User{
@@ -151,53 +162,65 @@ func TestDokodemoUDP(t *testing.T) {
 		},
 		Outbound: []*core.OutboundHandlerConfig{
 			{
-				ProxySettings: serial.ToTypedMessage(&freedom.Config{}),
+				ProxySettings: serial.ToTypedMessage(&freedom.Config{
+					FinalRules: []*freedom.FinalRuleConfig{{Action: freedom.RuleAction_Allow}},
+				}),
 			},
 		},
 	}
+	server, err := InitializeServerConfig(serverConfig)
+	common.Must(err)
+	defer CloseServer(server)
 
-	clientPort := uint32(tcp.PickPort())
-	clientPortRange := uint32(5)
-	clientConfig := &core.Config{
-		Inbound: []*core.InboundHandlerConfig{
-			{
-				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortRange: &net.PortRange{From: clientPort, To: clientPort + clientPortRange},
-					Listen:    net.NewIPOrDomain(net.LocalHostIP),
-				}),
-				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					Address: net.NewIPOrDomain(dest.Address),
-					Port:    uint32(dest.Port),
-					NetworkList: &net.NetworkList{
-						Network: []net.Network{net.Network_UDP},
-					},
-				}),
+	clientPortRange := uint32(3)
+	retry := 1
+	clientPort := uint32(udp.PickPort())
+	for {
+		clientConfig := &core.Config{
+			Inbound: []*core.InboundHandlerConfig{
+				{
+					ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
+						PortList: &net.PortList{Range: []*net.PortRange{{From: clientPort, To: clientPort + clientPortRange}}},
+						Listen:   net.NewIPOrDomain(net.LocalHostIP),
+					}),
+					ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
+						RewriteAddress:  net.NewIPOrDomain(dest.Address),
+						RewritePort:     uint32(dest.Port),
+						AllowedNetworks: []net.Network{net.Network_UDP},
+					}),
+				},
 			},
-		},
-		Outbound: []*core.OutboundHandlerConfig{
-			{
-				ProxySettings: serial.ToTypedMessage(&outbound.Config{
-					Receiver: []*protocol.ServerEndpoint{
-						{
+			Outbound: []*core.OutboundHandlerConfig{
+				{
+					ProxySettings: serial.ToTypedMessage(&outbound.Config{
+						Receiver: &protocol.ServerEndpoint{
 							Address: net.NewIPOrDomain(net.LocalHostIP),
 							Port:    uint32(serverPort),
-							User: []*protocol.User{
-								{
-									Account: serial.ToTypedMessage(&vmess.Account{
-										Id: userID.String(),
-									}),
-								},
+							User: &protocol.User{
+								Account: serial.ToTypedMessage(&vmess.Account{
+									Id: userID.String(),
+								}),
 							},
 						},
-					},
-				}),
+					}),
+				},
 			},
-		},
-	}
+		}
 
-	servers, err := InitializeServerConfigs(serverConfig, clientConfig)
-	common.Must(err)
-	defer CloseAllServers(servers)
+		server, _ := InitializeServerConfig(clientConfig)
+		if server != nil && WaitConnAvailableWithTest(t, testUDPConn(net.Port(clientPort), 1024, time.Second*2)) {
+			defer CloseServer(server)
+			break
+		}
+		if server != nil {
+			CloseServer(server)
+		}
+		retry++
+		if retry > 5 {
+			t.Fatal("All attempts failed to start client")
+		}
+		clientPort = uint32(udp.PickPort())
+	}
 
 	var errg errgroup.Group
 	for port := clientPort; port <= clientPort+clientPortRange; port++ {

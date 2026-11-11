@@ -5,8 +5,10 @@ import (
 	"sync"
 
 	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/net/cnc"
+	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/common/signal/done"
 	"github.com/xtls/xray-core/transport"
 )
@@ -31,13 +33,13 @@ func (l *OutboundListener) add(conn net.Conn) {
 func (l *OutboundListener) Accept() (net.Conn, error) {
 	select {
 	case <-l.done.Wait():
-		return nil, newError("listen closed")
+		return nil, errors.New("listen closed")
 	case c := <-l.buffer:
 		return c, nil
 	}
 }
 
-// Close implement net.Listener.
+// Close implements net.Listener.
 func (l *OutboundListener) Close() error {
 	common.Must(l.done.Close())
 L:
@@ -106,4 +108,14 @@ func (co *Outbound) Close() error {
 
 	co.closed = true
 	return co.listener.Close()
+}
+
+// SenderSettings implements outbound.Handler.
+func (co *Outbound) SenderSettings() *serial.TypedMessage {
+	return nil
+}
+
+// ProxySettings implements outbound.Handler.
+func (co *Outbound) ProxySettings() *serial.TypedMessage {
+	return nil
 }

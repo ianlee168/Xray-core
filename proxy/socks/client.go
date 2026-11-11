@@ -6,6 +6,7 @@ import (
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/retry"
@@ -16,54 +17,53 @@ import (
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/stat"
 )
 
 // Client is a Socks5 client.
 type Client struct {
-	serverPicker  protocol.ServerPicker
+	server        *protocol.ServerSpec
 	policyManager policy.Manager
 }
 
 // NewClient create a new Socks5 client based on the given config.
 func NewClient(ctx context.Context, config *ClientConfig) (*Client, error) {
-	serverList := protocol.NewServerList()
-	for _, rec := range config.Server {
-		s, err := protocol.NewServerSpecFromPB(rec)
-		if err != nil {
-			return nil, newError("failed to get server spec").Base(err)
-		}
-		serverList.AddServer(s)
+	if config.Server == nil {
+		return nil, errors.New(`no target server found`)
 	}
-	if serverList.Size() == 0 {
-		return nil, newError("0 target server")
+	server, err := protocol.NewServerSpecFromPB(config.Server)
+	if err != nil {
+		return nil, errors.New("failed to get server spec").Base(err)
 	}
 
 	v := core.MustFromContext(ctx)
-	return &Client{
-		serverPicker:  protocol.NewRoundRobinServerPicker(serverList),
+	c := &Client{
+		server:        server,
 		policyManager: v.GetFeature(policy.ManagerType()).(policy.Manager),
-	}, nil
+	}
+
+	return c, nil
 }
 
 // Process implements proxy.Outbound.Process.
 func (c *Client) Process(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
-	outbound := session.OutboundFromContext(ctx)
-	if outbound == nil || !outbound.Target.IsValid() {
-		return newError("target not specified.")
+	outbounds := session.OutboundsFromContext(ctx)
+	ob := outbounds[len(outbounds)-1]
+	if !ob.Target.IsValid() {
+		return errors.New("target not specified.")
 	}
+	ob.Name = "socks"
+	ob.CanSpliceCopy = 2
 	// Destination of the inner request.
-	destination := outbound.Target
+	destination := ob.Target
 
 	// Outbound server.
-	var server *protocol.ServerSpec
-	// Outbound server's destination.
-	var dest net.Destination
+	server := c.server
+	dest := server.Destination
 	// Connection to the outbound server.
-	var conn internet.Connection
+	var conn stat.Connection
 
 	if err := retry.ExponentialBackoff(5, 100).On(func() error {
-		server = c.serverPicker.PickServer()
-		dest = server.Destination()
 		rawConn, err := dialer.Dial(ctx, dest)
 		if err != nil {
 			return err
@@ -72,12 +72,12 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 
 		return nil
 	}); err != nil {
-		return newError("failed to find an available destination").Base(err)
+		return errors.New("failed to find an available destination").Base(err)
 	}
 
 	defer func() {
 		if err := conn.Close(); err != nil {
-			newError("failed to closed connection").Base(err).WriteToLog(session.ExportIDToError(ctx))
+			errors.LogInfoInner(ctx, err, "failed to closed connection")
 		}
 	}()
 
@@ -89,22 +89,23 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 		Address: destination.Address,
 		Port:    destination.Port,
 	}
+
 	if destination.Network == net.Network_UDP {
 		request.Command = protocol.RequestCommandUDP
 	}
 
-	user := server.PickUser()
+	user := server.User
 	if user != nil {
 		request.User = user
 		p = c.policyManager.ForLevel(user.Level)
 	}
 
 	if err := conn.SetDeadline(time.Now().Add(p.Timeouts.Handshake)); err != nil {
-		newError("failed to set deadline for handshake").Base(err).WriteToLog(session.ExportIDToError(ctx))
+		errors.LogInfoInner(ctx, err, "failed to set deadline for handshake")
 	}
 	udpRequest, err := ClientHandshake(request, conn, conn)
 	if err != nil {
-		return newError("failed to establish connection to server").AtWarning().Base(err)
+		return errors.New("failed to establish connection to server").Base(err)
 	}
 	if udpRequest != nil {
 		if udpRequest.Address == net.AnyIP || udpRequest.Address == net.AnyIPv6 {
@@ -113,11 +114,22 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 	}
 
 	if err := conn.SetDeadline(time.Time{}); err != nil {
-		newError("failed to clear deadline after handshake").Base(err).WriteToLog(session.ExportIDToError(ctx))
+		errors.LogInfoInner(ctx, err, "failed to clear deadline after handshake")
+	}
+
+	var newCtx context.Context
+	var newCancel context.CancelFunc
+	if session.TimeoutOnlyFromContext(ctx) {
+		newCtx, newCancel = context.WithCancel(context.Background())
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	timer := signal.CancelAfterInactivity(ctx, cancel, p.Timeouts.ConnectionIdle)
+	timer := signal.CancelAfterInactivity(ctx, func() {
+		cancel()
+		if newCancel != nil {
+			newCancel()
+		}
+	}, p.Timeouts.ConnectionIdle)
 
 	var requestFunc func() error
 	var responseFunc func() error
@@ -127,13 +139,14 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 			return buf.Copy(link.Reader, buf.NewWriter(conn), buf.UpdateActivity(timer))
 		}
 		responseFunc = func() error {
+			ob.CanSpliceCopy = 1
 			defer timer.SetTimeout(p.Timeouts.UplinkOnly)
 			return buf.Copy(buf.NewReader(conn), link.Writer, buf.UpdateActivity(timer))
 		}
 	} else if request.Command == protocol.RequestCommandUDP {
 		udpConn, err := dialer.Dial(ctx, udpRequest.Destination())
 		if err != nil {
-			return newError("failed to create UDP connection").Base(err)
+			return errors.New("failed to create UDP connection").Base(err)
 		}
 		defer udpConn.Close()
 		requestFunc = func() error {
@@ -142,15 +155,20 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 			return buf.Copy(link.Reader, writer, buf.UpdateActivity(timer))
 		}
 		responseFunc = func() error {
+			ob.CanSpliceCopy = 1
 			defer timer.SetTimeout(p.Timeouts.UplinkOnly)
 			reader := &UDPReader{Reader: udpConn}
 			return buf.Copy(reader, link.Writer, buf.UpdateActivity(timer))
 		}
 	}
 
-	var responseDonePost = task.OnSuccess(responseFunc, task.Close(link.Writer))
+	if newCtx != nil {
+		ctx = newCtx
+	}
+
+	responseDonePost := task.OnSuccess(responseFunc, task.Close(link.Writer))
 	if err := task.Run(ctx, requestFunc, responseDonePost); err != nil {
-		return newError("connection ends").Base(err)
+		return errors.New("connection ends").Base(err)
 	}
 
 	return nil

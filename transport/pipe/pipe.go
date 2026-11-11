@@ -52,18 +52,19 @@ func New(opts ...Option) (*Reader, *Writer) {
 		readSignal:  signal.NewNotifier(),
 		writeSignal: signal.NewNotifier(),
 		done:        done.New(),
+		errChan:     make(chan error, 1),
 		option: pipeOption{
 			limit: -1,
 		},
 	}
 
 	for _, opt := range opts {
-		opt(&(p.option))
+		opt(&p.option)
 	}
 
 	return &Reader{
-			pipe: p,
-		}, &Writer{
-			pipe: p,
-		}
+		pipe: p,
+	}, &Writer{
+		pipe: p,
+	}
 }

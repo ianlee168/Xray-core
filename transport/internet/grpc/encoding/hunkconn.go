@@ -3,11 +3,10 @@ package encoding
 import (
 	"context"
 	"io"
-	"net"
-
-	"google.golang.org/grpc/peer"
 
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/common/signal/done"
 )
@@ -37,24 +36,16 @@ func NewHunkReadWriter(hc HunkConn, cancel context.CancelFunc) *HunkReaderWriter
 	return &HunkReaderWriter{hc, cancel, done.New(), nil, 0}
 }
 
-func NewHunkConn(hc HunkConn, cancel context.CancelFunc) net.Conn {
-	var rAddr net.Addr
-	pr, ok := peer.FromContext(hc.Context())
-	if ok {
-		rAddr = pr.Addr
-	} else {
-		rAddr = &net.TCPAddr{
-			IP:   []byte{0, 0, 0, 0},
-			Port: 0,
-		}
-	}
-
+func NewHunkConn(hc HunkConn, cancel context.CancelFunc, trustedXForwardedFor []string) net.Conn {
+	rAddr := remoteAddrFromContext(hc.Context(), trustedXForwardedFor)
+	lAddr := localAddrFromContext(hc.Context())
 	wrc := NewHunkReadWriter(hc, cancel)
 	return cnc.NewConnection(
 		cnc.ConnectionInput(wrc),
 		cnc.ConnectionOutput(wrc),
 		cnc.ConnectionOnClose(wrc),
 		cnc.ConnectionRemoteAddr(rAddr),
+		cnc.ConnectionLocalAddr(lAddr),
 	)
 }
 
@@ -65,7 +56,7 @@ func (h *HunkReaderWriter) forceFetch() error {
 			return err
 		}
 
-		return newError("failed to fetch hunk from gRPC tunnel").Base(err)
+		return errors.New("failed to fetch hunk from gRPC tunnel").Base(err)
 	}
 
 	h.buf = hunk.Data
@@ -121,7 +112,7 @@ func (h *HunkReaderWriter) Write(buf []byte) (int, error) {
 
 	err := h.hc.Send(&Hunk{Data: buf[:]})
 	if err != nil {
-		return 0, newError("failed to send data over gRPC tunnel").Base(err)
+		return 0, errors.New("failed to send data over gRPC tunnel").Base(err)
 	}
 	return len(buf), nil
 }
